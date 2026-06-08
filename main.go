@@ -10,12 +10,16 @@ import (
 
 var url = "https://books.toscrape.com"
 var m = make(map[string]bool)
+var N = 10
 
 func main() {
-	crawl(url)
+	crawl(url, N)
 }
 
-func crawl(url string) {
+func crawl(url string, count int) {
+	if count == 0 {
+		return
+	}
 	resp, err := http.Get(url)
 	if err != nil {
 		panic(err)
@@ -25,11 +29,11 @@ func crawl(url string) {
 	if err != nil {
 		panic(err)
 	}
-	m[url]=true
-	walk(docs)
+	m[url] = true
+	walk(docs, count)
 }
 
-func walk(node *html.Node) {
+func walk(node *html.Node, count int) {
 	if node.Type == html.ElementNode && node.Data == "a" {
 		for _, attr := range node.Attr {
 			if attr.Key == "href" {
@@ -41,28 +45,29 @@ func walk(node *html.Node) {
 					if m[baseUrl] != true {
 						fmt.Println("url: ", baseUrl)
 						m[baseUrl] = true
-						crawl(baseUrl)
+						crawl(baseUrl, count-1)
 					}
 				} else if strings.HasPrefix(baseUrl, "/") {
 					baseUrl = url + baseUrl
 					if m[baseUrl] != true {
 						fmt.Println("url: ", baseUrl)
 						m[baseUrl] = true
-						crawl(baseUrl)
+						crawl(baseUrl, count-1)
 					}
 				} else {
 					baseUrl = url + "/" + baseUrl
 					if m[baseUrl] != true {
 						fmt.Println("url: ", baseUrl)
 						m[baseUrl] = true
-						crawl(baseUrl)
+						crawl(baseUrl, count-1)
 					}
 				}
 			}
+
 		}
 	}
 
 	for c := node.FirstChild; c != nil; c = c.NextSibling {
-		walk(c)
+		walk(c, count)
 	}
 }

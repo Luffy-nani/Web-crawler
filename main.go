@@ -4,19 +4,26 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"golang.org/x/net/html"
 )
 
 var url = "https://books.toscrape.com"
 var m = make(map[string]bool)
-var N = 10
+var N = 2
+var TotalPages = 0
 
 func main() {
+	start := time.Now()
 	crawl(url, N)
+	timeTaken := time.Since(start)
+	fmt.Println("Total Pages crawled: ", TotalPages)
+	fmt.Println("Total Time taken ", timeTaken)
 }
 
 func crawl(url string, count int) {
+	TotalPages++
 	if count == 0 {
 		return
 	}

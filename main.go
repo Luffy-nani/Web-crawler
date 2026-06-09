@@ -38,7 +38,6 @@ func main() {
 
 	start := time.Now()
 
-	// Rule 1: Add before send
 	wg.Add(1)
 	ch <- crawlJob{URL: parsedSeed, Depth: maxDepth}
 
@@ -46,20 +45,17 @@ func main() {
 		go func() {
 			for job := range ch {
 				crawl(job.URL, job.Depth)
-				wg.Done() // Rule 2: Done after job fully processed
+				wg.Done()
 			}
 		}()
 	}
 
-	// Closer goroutine
 	go func() {
 		wg.Wait()
 		close(ch)
 	}()
 
 	wg.Wait()
-
-	fmt.Println("\n====================================")
 	fmt.Println("Total Pages crawled:", atomic.LoadInt64(&TotalPages))
 	fmt.Println("Total Time taken:   ", time.Since(start))
 }
@@ -112,9 +108,9 @@ func walk(node *html.Node, baseURL *url.URL, depth int) {
 					mu.Unlock()
 
 					if depth > 1 {
-						wg.Add(1) // Rule 1: Add before send
+						wg.Add(1)
 						go func(u *url.URL) {
-							ch <- crawlJob{URL: u, Depth: depth - 1} // Rule 3: wrapped in goroutine
+							ch <- crawlJob{URL: u, Depth: depth - 1}
 						}(absoluteURL)
 					}
 				} else {

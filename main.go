@@ -13,110 +13,118 @@ import (
 )
 
 var baseHost = "books.toscrape.com"
-var seedUrl = "https://toscrape.com" // Sandbox start page
+var seedUrl = "https://toscrape.com"
 
-var m = make(map[string]bool)
-var N = 1
+var visited = make(map[string]bool)
+var mu sync.Mutex
 var TotalPages int64
+var workers = 3
+var maxDepth = 3
 
-var mu sync.RWMutex
+type crawlJob struct {
+	URL   *url.URL
+	Depth int
+}
+
 var wg sync.WaitGroup
+var ch = make(chan crawlJob, 200)
 
 func main() {
-	start := time.Now()
-
 	parsedSeed, err := url.Parse(seedUrl)
 	if err != nil {
 		fmt.Println("Error parsing seed URL:", err)
 		return
 	}
 
+	start := time.Now()
+
+	// Rule 1: Add before send
 	wg.Add(1)
-	go crawl(parsedSeed, N)
+	ch <- crawlJob{URL: parsedSeed, Depth: maxDepth}
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			for job := range ch {
+				crawl(job.URL, job.Depth)
+				wg.Done() // Rule 2: Done after job fully processed
+			}
+		}()
+	}
+
+	// Closer goroutine
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
 	wg.Wait()
 
-	timeTaken := time.Since(start)
 	fmt.Println("\n====================================")
-	fmt.Println("Total Pages crawled: ", atomic.LoadInt64(&TotalPages))
-	fmt.Println("Total Time taken:     ", timeTaken)
+	fmt.Println("Total Pages crawled:", atomic.LoadInt64(&TotalPages))
+	fmt.Println("Total Time taken:   ", time.Since(start))
 }
 
-func crawl(currentURL *url.URL, count int) {
-	defer wg.Done()
-	if count == 0 {
+func crawl(currentURL *url.URL, depth int) {
+	if depth == 0 {
 		return
 	}
 
 	urlStr := currentURL.String()
-	fmt.Println("Crawling depth:", count, "->", urlStr)
+	fmt.Println("Crawling depth:", depth, "->", urlStr)
 
-	req, err := http.NewRequest("GET", urlStr, nil)
-	if err != nil {
+	resp, err := http.Get(urlStr)
+	if err != nil || resp.StatusCode != http.StatusOK {
 		return
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return // If network fails, url isn't permanently locked out
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
-
 	atomic.AddInt64(&TotalPages, 1)
 
-	docs, err := html.Parse(resp.Body)
+	doc, err := html.Parse(resp.Body)
 	if err != nil {
 		return
 	}
 
-	// Walk through found items using the page's actual URL as the parsing base context
-	walk(docs, currentURL, count)
+	walk(doc, currentURL, depth)
 }
 
-func walk(node *html.Node, baseURL *url.URL, count int) {
+func walk(node *html.Node, baseURL *url.URL, depth int) {
 	if node.Type == html.ElementNode && node.Data == "a" {
 		for _, attr := range node.Attr {
 			if attr.Key == "href" {
-				// Clean fragment identifiers (e.g., #reviews) so you don't parse duplicates
 				rawUrl := strings.Split(attr.Val, "#")[0]
 				if rawUrl == "" {
 					continue
 				}
-
 				refURL, err := url.Parse(rawUrl)
 				if err != nil {
 					continue
 				}
-
-				// MAGIC STEP: Converts absolute, root-relative, and directory ../ paths seamlessly
 				absoluteURL := baseURL.ResolveReference(refURL)
-
-				// Ensure we stay within the sandbox host domain boundaries
 				if absoluteURL.Host != baseHost {
 					continue
 				}
+				fullStr := absoluteURL.String()
 
-				fullUrlStr := absoluteURL.String()
-
-				// Synchronize checking and marking in one map transaction block
 				mu.Lock()
-				if m[fullUrlStr] {
+				if !visited[fullStr] {
+					visited[fullStr] = true
 					mu.Unlock()
-					continue
-				}
-				m[fullUrlStr] = true
-				mu.Unlock()
 
-				wg.Add(1)
-				go crawl(absoluteURL, count-1)
+					if depth > 1 {
+						wg.Add(1) // Rule 1: Add before send
+						go func(u *url.URL) {
+							ch <- crawlJob{URL: u, Depth: depth - 1} // Rule 3: wrapped in goroutine
+						}(absoluteURL)
+					}
+				} else {
+					mu.Unlock()
+				}
 			}
 		}
 	}
 
 	for c := node.FirstChild; c != nil; c = c.NextSibling {
-		walk(c, baseURL, count)
+		walk(c, baseURL, depth)
 	}
 }

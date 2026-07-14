@@ -1,6 +1,7 @@
 package fetcher
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -40,13 +41,15 @@ func (f *Fetcher) Fetch(URL string) (*FetchResult, error) {
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return &FetchResult{}, err
+		return nil, err
 	}
 	defer resp.Body.Close()
-
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &HTTPError{URL: URL, StatusCode: resp.StatusCode}
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024)) // read only 5mb
 	if err != nil {
-		return &FetchResult{}, err
+		return nil, err
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -57,4 +60,13 @@ func (f *Fetcher) Fetch(URL string) (*FetchResult, error) {
 		Body:        body,
 		ContentType: contentType,
 	}, nil
+}
+
+type HTTPError struct {
+	URL        string
+	StatusCode int
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("fetch %s: unexpected status %d", e.URL, e.StatusCode)
 }

@@ -31,13 +31,20 @@ func New() *Fetcher {
 }
 
 func (f *Fetcher) Fetch(URL string) (*FetchResult, error) {
-	resp, err := f.client.Get(URL)
+	req, err := http.NewRequest("GET", URL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", "VenkatCrawler/1.0")
+
+	resp, err := f.client.Do(req)
 	if err != nil {
 		return &FetchResult{}, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024)) // read only 5mb
 	if err != nil {
 		return &FetchResult{}, err
 	}

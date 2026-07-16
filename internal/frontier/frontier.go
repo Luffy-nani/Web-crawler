@@ -128,6 +128,22 @@ func (f *Frontier) Done() {
 	}
 }
 
+// SetCrawlDelay overrides the crawl delay for a host, creating the
+// host's queue entry if it doesn't exist yet. Typically called once
+// robots.txt has been fetched and parsed for that host.
+func (f *Frontier) SetCrawlDelay(host string, delay time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	hq, exists := f.hosts[host]
+	if !exists {
+		hq = &HostQueue{CrawlDelay: delay}
+		f.hosts[host] = hq
+	} else {
+		hq.CrawlDelay = delay
+	}
+}
+
 // hasQueuedWorkLocked reports whether any host still has URLs waiting.
 // Caller must already hold f.mu.
 func (f *Frontier) hasQueuedWorkLocked() bool {

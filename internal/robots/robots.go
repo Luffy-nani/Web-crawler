@@ -1,4 +1,4 @@
-package robot
+package robots
 
 import (
 	"strconv"

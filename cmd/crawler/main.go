@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"sync"
 	"sync/atomic"
+
 	"webcrawler/internal/fetcher"
 	"webcrawler/internal/frontier"
 	"webcrawler/internal/parser"
@@ -42,24 +43,18 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 		if !ok {
 			return
 		}
-		u, err := url.Parse(rawurl)
-		if err != nil {
-			log.Printf("error parsing url: %v", err)
-			f.Done()
-			continue
-		}
-		if !robot.Allowed(u.Host, u.Path) {
-			log.Printf("URL %s is disallowed by robots.txt", rawurl)
-			f.Done()
-			continue
-		}
-		if delay, ok := robot.CrawlDelay(u.Host); ok {
-	f.SetCrawlDelay(u.Host, delay)
-}
+
+		// NOTE: no Allowed() check here anymore - by the time a URL is in
+		// the frontier at all, it was already verified allowed before
+		// being Add()'d (see the link loop below). Checking here would be
+		// too late: Next() already stamped LastFetch for this host the
+		// moment it handed the URL out, so a disallowed URL discarded here
+		// would have wasted that host's crawl-delay cooldown for nothing.
+
 		fresult, err := fetch.Fetch(rawurl)
 		if err != nil {
 			log.Printf("fetch error: %v", err)
-			f.Done() // still must report Done - Next() gave us this URL, we're finished with it
+			f.Done()
 			continue
 		}
 
@@ -70,10 +65,24 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 			continue
 		}
 
-		// Stop discovering new work once we've hit the page cap, but still
-		// report Done() for the URL we just finished either way.
 		if pagesCount.Load() < maxPages {
 			for _, link := range links {
+				u, err := url.Parse(link)
+				if err != nil {
+					continue
+				}
+
+				// Check BEFORE adding to the frontier, not after - this is
+				// the fix. A disallowed URL should never occupy a spot in
+				// a host's queue or trigger that host's crawl-delay cooldown.
+				if !robot.Allowed(u.Host, u.Path) {
+					continue
+				}
+
+				if delay, ok := robot.CrawlDelay(u.Host); ok {
+					f.SetCrawlDelay(u.Host, delay)
+				}
+
 				f.Add(link)
 			}
 		}

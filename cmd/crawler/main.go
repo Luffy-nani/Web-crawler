@@ -16,9 +16,9 @@ import (
 
 const maxPages = 50
 const numWorkers = 5
+const crawlInterval = 2 * time.Minute // how often to re-crawl the tracked seeds
 
 func main() {
-	f := frontier.New()
 	fetch := fetcher.New()
 	parse := parser.New()
 	robot := robots.New(fetch)
@@ -27,11 +27,38 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to open store: %v", err)
 	}
+	defer db.Close()
 
-	f.Add("https://example.com") // pick a real seed URL
+	seeds := []string{"https://example.com"} // sites you want tracked over time
+
+	// Run the first cycle immediately - a Ticker's first tick only fires
+	// AFTER the interval elapses, so without this line you'd wait 2 minutes
+	// before anything happened at all.
+	runCrawlCycle(seeds, fetch, parse, robot, db)
+
+	ticker := time.NewTicker(crawlInterval)
+	defer ticker.Stop()
+
+	// Each tick blocks here until runCrawlCycle() returns, so cycles never
+	// overlap - the next one only starts once the previous one is fully done.
+	for range ticker.C {
+		runCrawlCycle(seeds, fetch, parse, robot, db)
+	}
+}
+
+// runCrawlCycle runs ONE full crawl pass over the given seeds, using a
+// brand new Frontier (fresh dedup set) each time it's called. That's what
+// makes revisiting the same URLs across cycles work correctly - dedup
+// only applies WITHIN a single cycle, not across cycles.
+func runCrawlCycle(seeds []string, fetch *fetcher.Fetcher, parse *parser.Parser, robot *robots.Robots, db *store.Store) {
+	log.Println("=== starting new crawl cycle ===")
+
+	f := frontier.New()
+	for _, seed := range seeds {
+		f.Add(seed)
+	}
 
 	var pagesCount atomic.Int64
-
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
@@ -39,14 +66,7 @@ func main() {
 	}
 	wg.Wait()
 
-	// Close AFTER wg.Wait() - workers might still be crawling and calling
-	// db.Save() while wg.Wait() is blocking. Closing earlier could cause
-	// a worker to send on a closed channel, which panics in Go.
-	if err := db.Close(); err != nil {
-		log.Printf("error closing store: %v", err)
-	}
-
-	log.Printf("crawl finished, %d pages fetched\n", pagesCount.Load())
+	log.Printf("=== crawl cycle finished, %d pages fetched ===\n", pagesCount.Load())
 }
 
 func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, pagesCount *atomic.Int64, wg *sync.WaitGroup, robot *robots.Robots, db *store.Store) {
@@ -77,7 +97,7 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 				URL:        rawurl,
 				StatusCode: fresult.StatusCode,
 				FetchedAt:  time.Now(),
-				Err:        err.Error(),		
+				Err:        err.Error(),
 			})
 			f.Done()
 			continue

@@ -15,6 +15,7 @@ type Record struct {
 	Body        []byte
 	ContentType string
 	FetchedAt   time.Time
+	Err         string // empty string means the fetch succeeded
 }
 
 type Store struct {
@@ -36,7 +37,8 @@ CREATE TABLE IF NOT EXISTS pages (
     status_code INTEGER NOT NULL,
     content_type TEXT,
     body BLOB,
-    fetched_at DATETIME NOT NULL
+    fetched_at DATETIME NOT NULL,
+    error TEXT
 )
 `)
 	if err != nil {
@@ -63,9 +65,9 @@ func (s *Store) Save(r *Record) {
 func (s *Store) writeLoop() {
 	for r := range s.write {
 		_, err := s.db.Exec(`
-			INSERT INTO pages (url, status_code, content_type, body, fetched_at)
-			VALUES (?, ?, ?, ?, ?)
-		`, r.URL, r.StatusCode, r.ContentType, r.Body, r.FetchedAt)
+			INSERT INTO pages (url, status_code, content_type, body, fetched_at, error)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, r.URL, r.StatusCode, r.ContentType, r.Body, r.FetchedAt, r.Err)
 		if err != nil {
 			log.Printf("Failed to save record: %v", err)
 		}

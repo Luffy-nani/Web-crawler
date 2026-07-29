@@ -28,7 +28,7 @@ var skipTags = map[string]bool{
 }
 
 func (p *Parser) ExtractText(body []byte) (string, error) {
-	root, err := html.Parse(bytes.NewReader(body))
+	root, err := html.Parse(bytes.NewReader(body)) //html.Parse returns a pointer to the root node of the parsed HTML document
 	if err != nil {
 		return "", err
 	}

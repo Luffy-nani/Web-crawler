@@ -25,7 +25,7 @@ type Analyzer struct {
 func New() *Analyzer {
 	return &Analyzer{
 		// Local LLM generation can be slow, especially without a GPU -
-		// much longer timeout than your web Fetcher's 10s.
+		// much longer timeout than the web Fetcher's 10s.
 		client: &http.Client{Timeout: 60 * time.Second},
 	}
 }
@@ -39,7 +39,7 @@ type ollamaRequest struct {
 }
 
 // ollamaEnvelope is Ollama's OUTER response wrapper. Response is a string
-// containing more JSON text - that's the two-layer thing we discussed.
+// containing more JSON text - a second layer that needs its own decode.
 type ollamaEnvelope struct {
 	Response string `json:"response"`
 	Done     bool   `json:"done"`

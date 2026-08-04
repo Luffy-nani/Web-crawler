@@ -14,7 +14,7 @@ func ChunkText(text string, chunkSize int, overlapSize int) []string {
 		chunks = append(chunks, strings.Join(words[i:end], " "))
 
 		if end == len(words) {
-			break // already covered every word - stop here, don't loop into a tiny trailing chunk
+			break 
 		}
 	}
 	return chunks

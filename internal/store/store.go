@@ -146,9 +146,23 @@ func (s *Store) writeRecord(r *Record) {
 }
 
 func (s *Store) writeChunkBatch(chunks []Chunk) {
+	if len(chunks) == 0 {
+		return
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		log.Printf("failed to begin chunk transaction: %v", err)
+		return
+	}
+
+	// All chunks in one batch come from the same page/URL. Delete any
+	// previous chunks for this URL first, so re-embedding a CHANGED page
+	// replaces its old chunks instead of piling up duplicates alongside
+	// them over repeated crawl cycles.
+	if _, err := tx.Exec(`DELETE FROM chunks WHERE url = ?`, chunks[0].URL); err != nil {
+		log.Printf("failed to clear old chunks: %v", err)
+		tx.Rollback()
 		return
 	}
 

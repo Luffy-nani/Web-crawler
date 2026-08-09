@@ -1,28 +1,24 @@
 # Argus
 
-**A distributed web crawler that watches the internet change — and lets you ask it questions about what it finds.**
+**A distributed web crawler that watches the internet change, and lets you ask it questions about what it finds.**
 
-Named for Argus Panoptes, the many-eyed giant of Greek mythology whose one job was to watch everything and miss nothing.
-
----
-
-## What Argus does
-
-Point Argus at a set of websites — competitor pages, documentation, a knowledge base, anything — and it:
-
-1. **Crawls them properly.** Concurrent, `robots.txt`-compliant, per-host rate-limited, resumable, and built to scale horizontally across machines rather than just threads on one box.
-2. **Watches them over time.** Re-crawls on a schedule and uses a local LLM to tell the difference between a *meaningful* change (a price change, a new feature, a policy update) and cosmetic noise (ads, view counters, timestamps).
-3. **Makes them queryable by meaning.** Every page is chunked, embedded, and indexed — so instead of grepping through scraped HTML, you can ask a real question in plain English and get back a synthesized, sourced answer.
-
-Argus isn't a scraping script with an LLM bolted on. The crawler underneath is real infrastructure — concurrent by design, politeness-aware, horizontally scalable — the same category of engineering that powers actual search and monitoring products, not a `requests.get()` loop in a notebook.
+Named after Argus Panoptes, the many-eyed giant from Greek mythology whose whole job was to watch everything and miss nothing.
 
 ---
 
-## Why it exists
+## What it does
 
-Most "AI + web scraping" portfolio projects start from a lazy, single-threaded scraper and bolt a chatbot on top. Argus inverts that: the crawler is the hard part, built first and built properly, and the AI layer is a natural extension of data the system was already producing — not the whole point.
+Point Argus at a set of websites (competitor pages, docs, a knowledge base, whatever you care about) and it will:
 
----
+1. **Crawl them properly.** Concurrent, respects `robots.txt`, rate-limited per host, resumable, and built so it can scale across multiple machines instead of just running threads on one box.
+2. **Watch them over time.** Re-crawls on a schedule and uses a local LLM to tell apart a real change (a price update, a new feature, a policy change) from noise (ads, view counters, timestamps that update on their own).
+3. **Let you query them by meaning.** Every page gets chunked, embedded, and indexed, so instead of digging through scraped HTML you can just ask a question in plain English and get back an answer with sources.
+
+The crawler underneath isn't an afterthought. It's real concurrent infrastructure, built first, that the AI features sit on top of, rather than a scraping script with a chatbot bolted on.
+
+## Why I built it this way
+
+A lot of "AI + scraping" projects start from a single-threaded script that grabs a page and hands it to an LLM. I wanted the crawler itself to be the hard part, something that actually handles concurrency, politeness, and scale correctly, and then let the AI layer be a natural next step on top of data the system was already collecting, rather than the whole point of the project.
 
 ## Architecture
 
@@ -47,37 +43,31 @@ flowchart TD
     Jaeger --> Grafana
 ```
 
----
-
 ## Tech stack
 
 | Layer | Choice | Why |
 |---|---|---|
-| **Language** | Go | Concurrency primitives (goroutines, channels, `sync.Cond`) map directly onto the crawling problem |
-| **Storage** | SQLite | Real relational DB, zero ops, single file, trivial to inspect |
-| **Distributed coordination** | Redis | Shared queue + dedup set across worker processes/machines |
-| **Change detection** | Ollama (local LLM) | Free, unlimited, no API costs, runs entirely offline |
-| **Embeddings / semantic search** | Voyage AI (`voyage-4-lite`) | Retrieval-optimized, generous free tier |
-| **Observability** | OpenTelemetry → Prometheus (metrics) + Jaeger (traces) | Vendor-neutral instrumentation, industry-standard backends |
-| **Dashboards** | Grafana | Live view of crawl health, throughput, and detected changes |
-| **Deployment** | Docker / docker-compose | One-command local stack, horizontal worker scaling demoed live |
+| **Language** | Go | Goroutines, channels, and `sync.Cond` map naturally onto a crawling problem |
+| **Storage** | SQLite | Real relational DB, no separate server to run, easy to inspect |
+| **Distributed coordination** | Redis | Shared queue and dedup set across worker processes |
+| **Change detection** | Ollama (local LLM) | Free, unlimited, runs entirely offline |
+| **Embeddings / semantic search** | Voyage AI (`voyage-4-lite`) | Built for retrieval, generous free tier |
+| **Observability** | OpenTelemetry, Prometheus, Jaeger | Standard instrumentation, not a homemade metrics endpoint |
+| **Dashboards** | Grafana | A live view of crawl health and detected changes |
+| **Deployment** | Docker / docker-compose | One command to bring up the whole stack locally |
 
-**Total ongoing cost: $0.** Every dependency in this stack is free at the scale Argus runs at — a deliberate constraint, not an accident.
+This whole thing runs for free at the scale it's built for. That was a constraint I set on purpose, not something that happened by luck.
 
----
+## A few decisions worth explaining
 
-## Key engineering decisions
+Some parts of this took real thought, so I'll call them out instead of leaving them buried in the code:
 
-A few choices worth calling out, since they're the parts that took real thought rather than following a tutorial:
-
-- **Termination detection in the crawl frontier.** Knowing when a concurrent crawl is *actually* finished — not just "the queue looks empty right now" — requires tracking in-flight work separately from queued work. Built with a `pending` counter and `sync.Cond`, not a fixed timeout or a guess.
-- **`robots.txt` fetches are deduplicated with `singleflight`**, so five workers hitting a new host simultaneously trigger exactly one fetch, not five.
-- **Content extraction uses link-density scoring** (a simplified Readability-style algorithm) to find the real article content in a page, discounting nav bars and link-heavy boilerplate rather than naive tag-stripping.
-- **The database writer is single-threaded by design** — all writes funnel through one goroutine via channels (`select`-ing across page-writes and chunk-writes), sidestepping SQLite's single-writer limitation entirely rather than fighting it with locks.
-- **Re-embedding is change-gated, not blind.** Pages are only re-chunked and re-embedded when a real content change is detected — avoiding wasted API calls and duplicate search index entries on every re-crawl of an unchanged page.
-- **Brute-force cosine similarity, deliberately, not a vector database.** At this project's data volume (thousands, not millions, of chunks), a linear scan is faster to build, easier to reason about, and genuinely faster in practice than standing up ANN infrastructure. The upgrade path is known and documented, not needed yet.
-
----
+- **Knowing when a crawl is actually finished.** An empty queue doesn't mean the crawl is done, since a worker could still be mid-fetch and about to add ten new URLs. Argus tracks in-flight work separately from queued work with a `pending` counter and `sync.Cond`, instead of guessing with a timeout.
+- **`robots.txt` fetches are deduplicated.** If five workers hit a new host at the same moment, only one of them actually fetches `robots.txt`; the rest wait for that result instead of all hitting the site at once. Built with `singleflight`.
+- **Content extraction scores blocks by link density**, a simplified version of the Readability algorithm browsers use for reader mode. This is what keeps nav bars and related-link sidebars from being mistaken for the actual article text.
+- **Only one goroutine ever writes to the database.** Instead of locking around every write, all writes funnel through a single writer that listens on two channels with `select`. Sidesteps SQLite's single-writer limit entirely instead of working around it with mutexes.
+- **Pages only get re-embedded when they actually change.** If a re-crawl finds nothing meaningfully different, the existing chunks and embeddings stay as they are. Saves API calls and keeps the search index from filling up with duplicates of the same unchanged content.
+- **Similarity search is a plain loop, not a vector database.** At the scale this runs at (thousands of chunks, not millions), comparing everything directly is fast enough and much simpler to reason about than standing up something like FAISS or pgvector. If the data ever grew past that, this is the specific piece I'd swap out.
 
 ## Quick start
 
@@ -94,7 +84,7 @@ ollama serve
 # 3. Get a free Voyage AI API key (voyageai.com) and set it
 export VOYAGE_API_KEY=your-key-here
 
-# 4. Start the full stack (Redis, Prometheus, Grafana, Jaeger)
+# 4. Start the supporting stack (Redis, Prometheus, Grafana, Jaeger)
 docker-compose -f deploy/docker-compose.yml up -d
 
 # 5. Run the crawler
@@ -104,9 +94,7 @@ go run ./cmd/crawler
 go run ./cmd/search "what changed on their pricing page recently?"
 ```
 
-Grafana dashboard: `http://localhost:3000` · Prometheus: `http://localhost:9090` · Jaeger: `http://localhost:16686`
-
----
+Grafana: `http://localhost:3000` · Prometheus: `http://localhost:9090` · Jaeger: `http://localhost:16686`
 
 ## Project structure
 
@@ -117,20 +105,18 @@ argus/
     search/          CLI: ask a question, get a sourced answer
   internal/
     frontier/        concurrent URL queue, dedup, politeness, termination detection
-    fetcher/         HTTP fetching with timeouts + connection pooling
+    fetcher/         HTTP fetching with timeouts and connection pooling
     parser/          link extraction + readability-style content scoring
     robots/          robots.txt fetching, caching, singleflight dedup
     store/           SQLite persistence, single-writer pattern
     analyzer/        Ollama-backed change detection + answer synthesis
     embedder/        Voyage AI embeddings + text chunking
     search/           cosine similarity + top-K retrieval
-    metrics/         OpenTelemetry → Prometheus instrumentation
+    metrics/         OpenTelemetry to Prometheus instrumentation
   deploy/
     docker-compose.yml
     prometheus.yml
 ```
-
----
 
 ## Roadmap / status
 
@@ -145,8 +131,6 @@ argus/
 - [x] Distributed tracing (Jaeger)
 - [x] Dashboard (Grafana)
 - [x] Containerized deployment (Docker Compose)
-
----
 
 ## License
 

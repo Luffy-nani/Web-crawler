@@ -3,17 +3,23 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"webcrawler/internal/analyzer"
 	"webcrawler/internal/embedder"
 	"webcrawler/internal/fetcher"
 	"webcrawler/internal/frontier"
+	"webcrawler/internal/metrics"
 	"webcrawler/internal/parser"
 	"webcrawler/internal/robots"
 	"webcrawler/internal/store"
@@ -24,6 +30,7 @@ const numWorkers = 5
 const crawlInterval = 2 * time.Minute
 const chunkSize = 200
 const chunkOverlap = 40
+const metricsAddr = ":2112" // Prometheus will scrape http://localhost:2112/metrics
 
 func main() {
 	fetch := fetcher.New()
@@ -42,19 +49,35 @@ func main() {
 	}
 	defer db.Close()
 
+	m, metricsHandler, err := metrics.New()
+	if err != nil {
+		log.Fatalf("failed to init metrics: %v", err)
+	}
+
+	// Serve /metrics in its own goroutine - Prometheus scrapes this over
+	// HTTP on its own schedule, independent of the crawl loop.
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metricsHandler)
+		log.Printf("metrics available at http://localhost%s/metrics", metricsAddr)
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			log.Printf("metrics server error: %v", err)
+		}
+	}()
+
 	seeds := []string{"https://example.com"}
 
-	runCrawlCycle(seeds, fetch, parse, robot, analyze, embed, db)
+	runCrawlCycle(seeds, fetch, parse, robot, analyze, embed, db, m)
 
 	ticker := time.NewTicker(crawlInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		runCrawlCycle(seeds, fetch, parse, robot, analyze, embed, db)
+		runCrawlCycle(seeds, fetch, parse, robot, analyze, embed, db, m)
 	}
 }
 
-func runCrawlCycle(seeds []string, fetch *fetcher.Fetcher, parse *parser.Parser, robot *robots.Robots, analyze *analyzer.Analyzer, embed *embedder.Embedder, db *store.Store) {
+func runCrawlCycle(seeds []string, fetch *fetcher.Fetcher, parse *parser.Parser, robot *robots.Robots, analyze *analyzer.Analyzer, embed *embedder.Embedder, db *store.Store, m *metrics.Metrics) {
 	log.Println("=== starting new crawl cycle ===")
 
 	f := frontier.New()
@@ -62,19 +85,22 @@ func runCrawlCycle(seeds []string, fetch *fetcher.Fetcher, parse *parser.Parser,
 		f.Add(seed)
 	}
 
+	m.SetFrontier(f) // queue-depth gauge now reads from THIS cycle's Frontier
+
 	var pagesCount atomic.Int64
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go worker(f, fetch, parse, &pagesCount, &wg, robot, analyze, embed, db)
+		go worker(f, fetch, parse, &pagesCount, &wg, robot, analyze, embed, db, m)
 	}
 	wg.Wait()
 
 	log.Printf("=== crawl cycle finished, %d pages fetched ===\n", pagesCount.Load())
 }
 
-func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, pagesCount *atomic.Int64, wg *sync.WaitGroup, robot *robots.Robots, analyze *analyzer.Analyzer, embed *embedder.Embedder, db *store.Store) {
+func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, pagesCount *atomic.Int64, wg *sync.WaitGroup, robot *robots.Robots, analyze *analyzer.Analyzer, embed *embedder.Embedder, db *store.Store, m *metrics.Metrics) {
 	defer wg.Done()
+	ctx := context.Background() // no per-request context to thread through yet - fine for now
 
 	for {
 		rawurl, ok := f.Next()
@@ -82,9 +108,13 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 			return
 		}
 
+		fetchStart := time.Now()
 		fresult, err := fetch.Fetch(rawurl)
+		m.FetchDuration.Record(ctx, time.Since(fetchStart).Seconds())
+
 		if err != nil {
 			log.Printf("fetch error: %v", err)
+			m.PagesFetched.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "error")))
 			db.Save(&store.Record{
 				URL:       rawurl,
 				FetchedAt: time.Now(),
@@ -93,6 +123,7 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 			f.Done()
 			continue
 		}
+		m.PagesFetched.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "success")))
 
 		links, err := parse.ExtractLinks(fresult.URL, fresult.Body)
 		if err != nil {
@@ -113,10 +144,6 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 			newText = ""
 		}
 
-		// shouldIndex tracks whether this page's content needs (re)embedding -
-		// true if it's brand new, or if analyzer confirms a meaningful change.
-		// False (default) means "unchanged - existing chunks are still valid,
-		// don't waste Voyage API calls or create duplicate chunks."
 		shouldIndex := false
 
 		prev, found, err := db.GetLatestSnapshot(rawurl)
@@ -132,11 +159,12 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 			} else if result.Changed {
 				log.Printf(">>> CHANGE DETECTED on %s: %s", rawurl, result.Summary)
 				shouldIndex = true
+				m.ChangesDetected.Add(ctx, 1)
 			}
 		}
 
 		if shouldIndex && newText != "" {
-			indexPage(rawurl, newText, embed, db)
+			indexPage(ctx, rawurl, newText, embed, db, m)
 		}
 
 		if pagesCount.Load() < maxPages {
@@ -185,9 +213,7 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 	}
 }
 
-// indexPage chunks a page's text, embeds each chunk via Voyage, and
-// saves the results - the "indexing" half of Phase 7's RAG pipeline.
-func indexPage(rawurl string, text string, embed *embedder.Embedder, db *store.Store) {
+func indexPage(ctx context.Context, rawurl string, text string, embed *embedder.Embedder, db *store.Store, m *metrics.Metrics) {
 	pieces := embedder.ChunkText(text, chunkSize, chunkOverlap)
 	if len(pieces) == 0 {
 		return
@@ -211,6 +237,7 @@ func indexPage(rawurl string, text string, embed *embedder.Embedder, db *store.S
 	}
 
 	db.SaveChunks(chunks)
+	m.PagesIndexed.Add(ctx, 1)
 	log.Printf("indexed %s (%d chunks)", rawurl, len(chunks))
 }
 

@@ -144,6 +144,20 @@ func (f *Frontier) SetCrawlDelay(host string, delay time.Duration) {
 	}
 }
 
+// QueueDepth returns the total number of URLs currently queued across
+// all hosts - a live snapshot for metrics/monitoring, not used by the
+// crawl logic itself.
+func (f *Frontier) QueueDepth() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	total := 0
+	for _, h := range f.hosts {
+		total += len(h.URLS)
+	}
+	return total
+}
+
 // hasQueuedWorkLocked reports whether any host still has URLs waiting.
 // Caller must already hold f.mu.
 func (f *Frontier) hasQueuedWorkLocked() bool {

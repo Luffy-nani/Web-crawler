@@ -1,1 +1,25 @@
+# Compiled binaries
+/crawler
+/search
+*.exe
+
+# Runtime data - generated, not source
+*.db
+*.db-journal
+
+# Environment / secrets - NEVER commit API keys
 .env
+.env.local
+
+# Go build artifacts
+/bin/
+/dist/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp

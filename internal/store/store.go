@@ -34,6 +34,13 @@ type Change struct {
 	DetectedAt time.Time
 }
 
+type TrackedPage struct {
+	URL        string
+	StatusCode int
+	Err        string
+	FetchedAt  time.Time
+}
+
 type Store struct {
 	db           *sql.DB
 	write        chan *Record
@@ -318,4 +325,36 @@ func (s *Store) GetRecentChanges(limit int) ([]Change, error) {
 		changes = append(changes, c)
 	}
 	return changes, rows.Err()
+}
+
+func (s *Store) GetTrackedPages() ([]TrackedPage, error) {
+	rows, err := s.db.Query(`
+		SELECT url, status_code, error, fetched_at
+		FROM (
+			SELECT
+				id,
+				url,
+				status_code,
+				error,
+				fetched_at,
+				ROW_NUMBER() OVER (PARTITION BY url ORDER BY fetched_at DESC, id DESC) AS rn
+			FROM pages
+		)
+		WHERE rn = 1
+		ORDER BY fetched_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pages []TrackedPage
+	for rows.Next() {
+		var p TrackedPage
+		if err := rows.Scan(&p.URL, &p.StatusCode, &p.Err, &p.FetchedAt); err != nil {
+			return nil, err
+		}
+		pages = append(pages, p)
+	}
+	return pages, rows.Err()
 }

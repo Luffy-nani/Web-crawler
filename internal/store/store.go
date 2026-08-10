@@ -28,11 +28,18 @@ type Chunk struct {
 	CreatedAt time.Time
 }
 
+type Change struct {
+	URL        string
+	Summary    string
+	DetectedAt time.Time
+}
+
 type Store struct {
-	db          *sql.DB
-	write       chan *Record
-	writeChunks chan []Chunk
-	wg          sync.WaitGroup
+	db           *sql.DB
+	write        chan *Record
+	writeChunks  chan []Chunk
+	writeChanges chan Change
+	wg           sync.WaitGroup
 }
 
 func New(dbPath string) (*Store, error) {
@@ -72,6 +79,19 @@ CREATE TABLE IF NOT EXISTS chunks (
 		return nil, err
 	}
 
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detected_at DATETIME NOT NULL
+)
+`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_pages_url ON pages(url)`)
 	if err != nil {
 		db.Close()
@@ -79,9 +99,10 @@ CREATE TABLE IF NOT EXISTS chunks (
 	}
 
 	s := &Store{
-		db:          db,
-		write:       make(chan *Record, 100),
-		writeChunks: make(chan []Chunk, 100),
+		db:           db,
+		write:        make(chan *Record, 100),
+		writeChunks:  make(chan []Chunk, 100),
+		writeChanges: make(chan Change, 100),
 	}
 
 	s.wg.Add(1)
@@ -102,19 +123,27 @@ func (s *Store) SaveChunks(chunks []Chunk) {
 	s.writeChunks <- chunks
 }
 
+func (s *Store) SaveChange(url, summary string) {
+	s.writeChanges <- Change{
+		URL:        url,
+		Summary:    summary,
+		DetectedAt: time.Now(),
+	}
+}
+
 // writeLoop is the ONLY goroutine that ever touches s.db. It listens on
-// BOTH channels via select, so page saves and chunk saves never race
-// against each other - there's still exactly one writer, just handling
-// two kinds of incoming work instead of one.
+// all write channels via select, so page saves, chunk saves, and change
+// saves never race against each other - there's still exactly one writer,
+// just handling multiple kinds of incoming work.
 //
-// The loop ends when BOTH channels are closed and drained - that's what
-// the two "open" booleans track. A channel receive's second return value
+// The loop ends when all channels are closed and drained - that's what
+// the "open" booleans track. A channel receive's second return value
 // (ok) is false once a channel is closed AND empty, same signal you've
 // used before with Frontier.Next().
 func (s *Store) writeLoop() {
-	recordsOpen, chunksOpen := true, true
+	recordsOpen, chunksOpen, changesOpen := true, true, true
 
-	for recordsOpen || chunksOpen {
+	for recordsOpen || chunksOpen || changesOpen {
 		select {
 		case r, ok := <-s.write:
 			if !ok {
@@ -131,6 +160,14 @@ func (s *Store) writeLoop() {
 				continue
 			}
 			s.writeChunkBatch(c)
+
+		case c, ok := <-s.writeChanges:
+			if !ok {
+				changesOpen = false
+				s.writeChanges = nil
+				continue
+			}
+			s.writeChange(c)
 		}
 	}
 }
@@ -193,11 +230,22 @@ func (s *Store) writeChunkBatch(chunks []Chunk) {
 	}
 }
 
-// Close signals no more writes are coming on EITHER channel, and blocks
-// until writeLoop has drained both and fully exited.
+func (s *Store) writeChange(c Change) {
+	_, err := s.db.Exec(`
+		INSERT INTO changes (url, summary, detected_at)
+		VALUES (?, ?, ?)
+	`, c.URL, c.Summary, c.DetectedAt)
+	if err != nil {
+		log.Printf("failed to save change: %v", err)
+	}
+}
+
+// Close signals no more writes are coming on any write channel, and blocks
+// until writeLoop has drained all and fully exited.
 func (s *Store) Close() error {
 	close(s.write)
 	close(s.writeChunks)
+	close(s.writeChanges)
 	s.wg.Wait()
 	return s.db.Close()
 }
@@ -247,4 +295,27 @@ func (s *Store) GetAllChunks() ([]Chunk, error) {
 		chunks = append(chunks, c)
 	}
 	return chunks, rows.Err()
+}
+
+func (s *Store) GetRecentChanges(limit int) ([]Change, error) {
+	rows, err := s.db.Query(`
+		SELECT url, summary, detected_at
+		FROM changes
+		ORDER BY detected_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var changes []Change
+	for rows.Next() {
+		var c Change
+		if err := rows.Scan(&c.URL, &c.Summary, &c.DetectedAt); err != nil {
+			return nil, err
+		}
+		changes = append(changes, c)
+	}
+	return changes, rows.Err()
 }

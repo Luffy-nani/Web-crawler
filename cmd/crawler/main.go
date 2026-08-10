@@ -158,6 +158,7 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 				log.Printf("analyzer error for %s: %v", rawurl, err)
 			} else if result.Changed {
 				log.Printf(">>> CHANGE DETECTED on %s: %s", rawurl, result.Summary)
+				db.SaveChange(rawurl, result.Summary)
 				shouldIndex = true
 				m.ChangesDetected.Add(ctx, 1)
 			}

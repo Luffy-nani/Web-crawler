@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"time"
-	"strings"
 )
 
 const ollamaURL = "http://localhost:11434/api/generate"
@@ -27,7 +26,7 @@ func New() *Analyzer {
 	return &Analyzer{
 		// Local LLM generation can be slow, especially without a GPU -
 		// much longer timeout than the web Fetcher's 10s.
-		client: &http.Client{Timeout: 60 * time.Second},
+		client: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -101,49 +100,4 @@ NEW VERSION:
 
 Respond with ONLY a JSON object in this exact shape, no other text:
 {"changed": true or false, "summary": "one sentence describing what changed, or empty string if nothing changed"}`, oldText, newText)
-}
-
-type AnswerResult struct {
-	Answer string `json:"answer"`
-}
-
-func (a *Analyzer) Answer(question string, context []string) (string, error) {
-	prompt := buildAnswerPrompt(question, context)
-
-	reqBody := ollamaRequest{Model: model, Prompt: prompt, Stream: false, Format: "json"}
-	bodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
-	}
-
-	resp, err := a.client.Post(ollamaURL, "application/json", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", fmt.Errorf("calling ollama: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var envelope ollamaEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return "", fmt.Errorf("decode envelope: %w", err)
-	}
-
-	var result AnswerResult
-	if err := json.Unmarshal([]byte(envelope.Response), &result); err != nil {
-		return "", fmt.Errorf("decode answer json: %w", err)
-	}
-	return result.Answer, nil
-}
-
-func buildAnswerPrompt(question string, context []string) string {
-	joined := strings.Join(context, "\n\n---\n\n")
-	return fmt.Sprintf(`Answer the question using ONLY the context provided below. If the context doesn't contain enough information to answer, say so honestly.
-
-CONTEXT:
-%s
-
-QUESTION:
-%s
-
-Respond with ONLY a JSON object in this exact shape, no other text:
-{"answer": "your answer here, citing specific facts from the context"}`, joined, question)
 }

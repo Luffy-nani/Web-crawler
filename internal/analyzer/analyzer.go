@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -100,4 +101,46 @@ NEW VERSION:
 
 Respond with ONLY a JSON object in this exact shape, no other text:
 {"changed": true or false, "summary": "one sentence describing what changed, or empty string if nothing changed"}`, oldText, newText)
+}
+
+func (a *Analyzer) Answer(question string, context []string) (string, error) {
+	reqBody := ollamaRequest{
+		Model:  model,
+		Prompt: buildAnswerPrompt(question, context),
+		Stream: false,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	resp, err := a.client.Post(ollamaURL, "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("calling ollama: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama returned status %d", resp.StatusCode)
+	}
+
+	var envelope ollamaEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return "", fmt.Errorf("decode ollama envelope: %w", err)
+	}
+
+	return strings.TrimSpace(envelope.Response), nil
+}
+
+func buildAnswerPrompt(question string, context []string) string {
+	return fmt.Sprintf(`Answer the question using only the provided context. If the answer is not in the context, say you don't know.
+
+Question:
+%s
+
+Context:
+%s
+
+Answer clearly and concisely.`, question, strings.Join(context, "\n\n"))
 }

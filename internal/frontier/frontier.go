@@ -13,6 +13,7 @@ type Frontier struct {
 	seen    map[string]struct{}
 	hosts   map[string]*HostQueue
 	pending int // URLs handed out by Next() but not yet reported Done()
+	state   CrawlStateStore
 }
 
 type HostQueue struct {
@@ -21,10 +22,21 @@ type HostQueue struct {
 	CrawlDelay time.Duration
 }
 
+type CrawlStateStore interface {
+	QueueURL(url string)
+	MarkProcessing(url string)
+	MarkDone(url string)
+}
+
 func New() *Frontier {
+	return NewWithStateStore(nil)
+}
+
+func NewWithStateStore(state CrawlStateStore) *Frontier {
 	f := &Frontier{
 		seen:  make(map[string]struct{}),
 		hosts: make(map[string]*HostQueue),
+		state: state,
 	}
 	f.cond = sync.NewCond(&f.mu) // cond shares the same lock as f.mu
 	return f
@@ -33,22 +45,10 @@ func New() *Frontier {
 // Add normalizes and queues a URL if it hasn't been seen before.
 // Called by main (for seed URLs) and by workers (for discovered links).
 func (f *Frontier) Add(rawURL string) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
+	normalized, host, ok := normalizeURL(rawURL)
+	if !ok {
 		return
 	}
-
-	u.Scheme = strings.ToLower(u.Scheme)
-	u.Host = strings.ToLower(u.Host)
-
-	if (u.Scheme == "http" && u.Port() == "80") ||
-		(u.Scheme == "https" && u.Port() == "443") {
-		u.Host = u.Hostname()
-	}
-
-	u.Fragment = ""
-
-	normalized := u.String()
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -58,15 +58,30 @@ func (f *Frontier) Add(rawURL string) {
 	}
 	f.seen[normalized] = struct{}{}
 
-	hq, exists := f.hosts[u.Host]
+	hq, exists := f.hosts[host]
 	if !exists {
 		hq = &HostQueue{CrawlDelay: time.Second}
-		f.hosts[u.Host] = hq
+		f.hosts[host] = hq
 	}
 	hq.URLS = append(hq.URLS, normalized)
+	if f.state != nil {
+		f.state.QueueURL(normalized)
+	}
 
 	// New work just arrived - wake a worker that might be sleeping in Wait().
 	f.cond.Broadcast()
+}
+
+// MarkSeen records a URL as already seen without queueing it.
+func (f *Frontier) MarkSeen(rawURL string) {
+	normalized, _, ok := normalizeURL(rawURL)
+	if !ok {
+		return
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seen[normalized] = struct{}{}
 }
 
 // Next returns the next URL to crawl. ok is false only when the frontier
@@ -87,6 +102,9 @@ func (f *Frontier) Next() (string, bool) {
 				host.URLS = host.URLS[1:]
 				host.LastFetch = time.Now()
 				f.pending++
+				if f.state != nil {
+					f.state.MarkProcessing(u)
+				}
 				return u, true
 			}
 		}
@@ -115,9 +133,16 @@ func (f *Frontier) Next() (string, bool) {
 // Done reports that a worker finished processing the URL it was given
 // (whether or not it found new links). Must be called exactly once per
 // successful Next() call.
-func (f *Frontier) Done() {
+func (f *Frontier) Done(rawURL string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.state != nil {
+		normalized, _, ok := normalizeURL(rawURL)
+		if ok {
+			f.state.MarkDone(normalized)
+		}
+	}
 
 	f.pending--
 
@@ -167,4 +192,22 @@ func (f *Frontier) hasQueuedWorkLocked() bool {
 		}
 	}
 	return false
+}
+
+func normalizeURL(rawURL string) (normalized string, host string, ok bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "", false
+	}
+
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+
+	if (u.Scheme == "http" && u.Port() == "80") ||
+		(u.Scheme == "https" && u.Port() == "443") {
+		u.Host = u.Hostname()
+	}
+
+	u.Fragment = ""
+	return u.String(), u.Host, true
 }

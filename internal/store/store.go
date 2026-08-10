@@ -28,6 +28,11 @@ type Chunk struct {
 	CreatedAt time.Time
 }
 
+type CrawlState struct {
+	URL   string
+	State string
+}
+
 type Store struct {
 	db          *sql.DB
 	write       chan *Record
@@ -73,6 +78,24 @@ CREATE TABLE IF NOT EXISTS chunks (
 	}
 
 	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_pages_url ON pages(url)`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS crawl_state (
+    url TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    updated_at DATETIME NOT NULL
+)
+`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_crawl_state_state ON crawl_state(state)`)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -247,4 +270,59 @@ func (s *Store) GetAllChunks() ([]Chunk, error) {
 		chunks = append(chunks, c)
 	}
 	return chunks, rows.Err()
+}
+
+func (s *Store) QueueURL(url string) {
+	_, err := s.db.Exec(`
+		INSERT OR IGNORE INTO crawl_state (url, state, updated_at)
+		VALUES (?, 'queued', ?)
+	`, url, time.Now())
+	if err != nil {
+		log.Printf("failed to queue crawl url: %v", err)
+	}
+}
+
+func (s *Store) MarkProcessing(url string) {
+	_, err := s.db.Exec(`
+		UPDATE crawl_state
+		SET state = 'processing', updated_at = ?
+		WHERE url = ?
+	`, time.Now(), url)
+	if err != nil {
+		log.Printf("failed to mark url processing: %v", err)
+	}
+}
+
+func (s *Store) MarkDone(url string) {
+	_, err := s.db.Exec(`
+		UPDATE crawl_state
+		SET state = 'done', updated_at = ?
+		WHERE url = ?
+	`, time.Now(), url)
+	if err != nil {
+		log.Printf("failed to mark url done: %v", err)
+	}
+}
+
+func (s *Store) LoadCrawlState() ([]CrawlState, error) {
+	rows, err := s.db.Query(`SELECT url, state FROM crawl_state`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var states []CrawlState
+	for rows.Next() {
+		var st CrawlState
+		if err := rows.Scan(&st.URL, &st.State); err != nil {
+			return nil, err
+		}
+		states = append(states, st)
+	}
+	return states, rows.Err()
+}
+
+func (s *Store) ClearCrawlState() error {
+	_, err := s.db.Exec(`DELETE FROM crawl_state`)
+	return err
 }

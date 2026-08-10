@@ -80,9 +80,33 @@ func main() {
 func runCrawlCycle(seeds []string, fetch *fetcher.Fetcher, parse *parser.Parser, robot *robots.Robots, analyze *analyzer.Analyzer, embed *embedder.Embedder, db *store.Store, m *metrics.Metrics) {
 	log.Println("=== starting new crawl cycle ===")
 
-	f := frontier.New()
-	for _, seed := range seeds {
-		f.Add(seed)
+	f := frontier.NewWithStateStore(db)
+
+	states, err := db.LoadCrawlState()
+	if err != nil {
+		log.Printf("failed to load crawl state: %v", err)
+	}
+
+	for _, st := range states {
+		switch st.State {
+		case "done":
+			f.MarkSeen(st.URL)
+		case "queued", "processing":
+			f.Add(st.URL)
+		}
+	}
+
+	if f.QueueDepth() == 0 {
+		if len(states) > 0 {
+			if err := db.ClearCrawlState(); err != nil {
+				log.Printf("failed to clear stale crawl state: %v", err)
+			}
+		}
+		for _, seed := range seeds {
+			f.Add(seed)
+		}
+	} else {
+		log.Printf("resuming crawl with %d queued urls", f.QueueDepth())
 	}
 
 	m.SetFrontier(f) // queue-depth gauge now reads from THIS cycle's Frontier
@@ -94,6 +118,12 @@ func runCrawlCycle(seeds []string, fetch *fetcher.Fetcher, parse *parser.Parser,
 		go worker(f, fetch, parse, &pagesCount, &wg, robot, analyze, embed, db, m)
 	}
 	wg.Wait()
+
+	if f.QueueDepth() == 0 {
+		if err := db.ClearCrawlState(); err != nil {
+			log.Printf("failed to clear crawl state after cycle: %v", err)
+		}
+	}
 
 	log.Printf("=== crawl cycle finished, %d pages fetched ===\n", pagesCount.Load())
 }
@@ -120,7 +150,7 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 				FetchedAt: time.Now(),
 				Err:       err.Error(),
 			})
-			f.Done()
+			f.Done(rawurl)
 			continue
 		}
 		m.PagesFetched.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "success")))
@@ -134,7 +164,7 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 				FetchedAt:  time.Now(),
 				Err:        err.Error(),
 			})
-			f.Done()
+			f.Done(rawurl)
 			continue
 		}
 
@@ -205,7 +235,7 @@ func worker(f *frontier.Frontier, fetch *fetcher.Fetcher, parse *parser.Parser, 
 		count := pagesCount.Add(1)
 		log.Printf("[%d/%d] fetched %s (%d links found)", count, int64(maxPages), rawurl, len(links))
 
-		f.Done()
+		f.Done(rawurl)
 
 		if count >= maxPages {
 			return
